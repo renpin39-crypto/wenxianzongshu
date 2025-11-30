@@ -13,13 +13,16 @@ from pypdf import PdfReader
 # --- 页面配置 ---
 st.set_page_config(page_title="双引擎文献综述", layout="wide")
 
-st.title("🚀 双引擎 AI 综述生成器 (防重置版)")
+st.title("🚀 双引擎 AI 综述生成器 (最终完美版)")
 st.markdown("""
-**注意**：由于服务器限制，**请使用 ZIP 格式**上传压缩包。
+**版本特性**：
+✅ **Kimi 解析**：长文本读取，精准提取摘要。
+✅ **DeepSeek 写作**：深度思考，逻辑严密。
+✅ **防闪退**：点击写作时不会丢失数据。
+✅ **全量显示**：上传多少篇显示多少篇。
 """)
 
 # --- 初始化记忆 (Session State) ---
-# 这是解决“闪退”的关键：如果内存里没有 df，先创建一个空的
 if 'df' not in st.session_state:
     st.session_state.df = None
 
@@ -132,30 +135,27 @@ client_ds = get_client(ds_key, ds_base)
 # 1. 解析逻辑
 if input_mode == "直接上传 CSV":
     f = st.file_uploader("上传 CSV", type=["csv"])
-    if f: 
-        st.session_state.df = pd.read_csv(f) # 存入记忆
+    if f: st.session_state.df = pd.read_csv(f)
 else:
     z = st.file_uploader("上传 ZIP 压缩包", type=["zip"])
-    # 只有当点击解析按钮时，才进行繁重的解析工作
     if z and st.button("开始解析 (调用 Kimi)"):
         if not client_kimi: st.error("请填入 Kimi API Key")
         else:
             df_result, err = parse_zip_files(z, client_kimi, kimi_model)
             if err: st.error(err)
-            else:
-                st.session_state.df = df_result # 关键：解析成功后，存入记忆！
+            else: st.session_state.df = df_result
 
-# 2. 写作逻辑 (只要记忆里有数据，就显示)
+# 2. 写作逻辑
 if st.session_state.df is not None:
     df = st.session_state.df
     if 'ID' not in df.columns: df['ID'] = range(1, len(df)+1)
     df.fillna("Unknown", inplace=True)
     
     st.divider()
+    # 🌟 修改点：这里去掉了 .head(3)，将显示所有数据
     st.subheader(f"📊 已加载 {len(df)} 篇文献")
-    st.dataframe(df.head(3))
+    st.dataframe(df)  
     
-    # 这里的按钮点击后，虽然页面刷新，但 st.session_state.df 还在，所以不会闪退
     if len(df) > 0 and st.button("🚀 开始写作 (调用 DeepSeek)"):
         if not client_ds: st.error("请填入 DeepSeek API Key")
         else:
