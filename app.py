@@ -4,7 +4,6 @@ import openai
 from datetime import datetime
 import io
 import zipfile
-import rarfile
 import json
 import re
 import numpy as np
@@ -12,36 +11,33 @@ from docx import Document
 from pypdf import PdfReader
 
 # --- 页面配置 ---
-st.set_page_config(page_title="双引擎文献综述(调试版)", layout="wide")
+st.set_page_config(page_title="双引擎文献综述", layout="wide")
 
-st.title("🛠️ 双引擎综述生成器 (含错误诊断)")
+st.title("🚀 双引擎 AI 综述生成器 (稳定版)")
 st.markdown("""
-**调试模式已开启**：
-如果出现解析失败，摘要栏会显示具体的**错误原因**，而不是简单的“失败”。
-同时增强了对非 JSON 格式返回的兼容性。
+**注意**：由于服务器限制，**请使用 ZIP 格式**上传压缩包。
 """)
 
-# --- 侧边栏：双模型配置 ---
+# --- 侧边栏 ---
 with st.sidebar:
     st.header("1. 阅读引擎 (Kimi)")
-    # 尝试读取 Kimi Secrets
     default_kimi = st.secrets.get("MOONSHOT_API_KEY", "")
-    kimi_key = st.text_input("Kimi API Key", value=default_kimi, type="password", key="k_key")
-    kimi_base = st.text_input("Kimi Base URL", value="https://api.moonshot.cn/v1", key="k_base")
-    kimi_model = st.text_input("Kimi 模型名", value="moonshot-v1-8k", key="k_model")
+    kimi_key = st.text_input("Kimi API Key", value=default_kimi, type="password")
+    kimi_base = st.text_input("Kimi Base URL", value="https://api.moonshot.cn/v1")
+    kimi_model = st.text_input("Kimi 模型名", value="moonshot-v1-8k")
 
     st.divider()
 
     st.header("2. 写作引擎 (DeepSeek)")
     default_ds = st.secrets.get("DEEPSEEK_API_KEY", "")
-    ds_key = st.text_input("DeepSeek API Key", value=default_ds, type="password", key="d_key")
-    ds_base = st.text_input("DeepSeek Base URL", value="https://api.deepseek.com", key="d_base")
-    ds_model = st.text_input("DeepSeek 模型名", value="deepseek-chat", key="d_model")
+    ds_key = st.text_input("DeepSeek API Key", value=default_ds, type="password")
+    ds_base = st.text_input("DeepSeek Base URL", value="https://api.deepseek.com")
+    ds_model = st.text_input("DeepSeek 模型名", value="deepseek-chat")
     
     st.divider()
     st.header("3. 设置")
     top_k = st.slider("每章参考数量", 1, 50, 5)
-    input_mode = st.radio("选择方式", ["直接上传 CSV", "上传压缩包 (ZIP/RAR)"])
+    input_mode = st.radio("选择方式", ["直接上传 CSV", "上传 ZIP 压缩包"])
 
 # --- 核心逻辑 ---
 
@@ -50,23 +46,10 @@ def get_client(api_key, base_url):
     return openai.OpenAI(api_key=api_key, base_url=base_url)
 
 def extract_pdf_info_with_kimi(client, model, pdf_text, filename):
-    """Kimi 提取逻辑 (增强容错)"""
-    # 提示词优化：明确告诉它可能是中文
     prompt = f"""
-    你是一个数据提取助手。请阅读以下论文片段（可能包含中文或英文）。
-    
-    【任务】
-    提取以下字段并返回 JSON 格式：
-    - Title: 论文标题 (如果找不到，用文件名 "{filename}")
-    - Abstract: 摘要 (如果找不到摘要，请总结前两页内容，300字以内)
-    - Year: 发表年份 (int类型, 找不到填2024)
-    - Author: 第一作者 (找不到填 Unknown)
-    
-    【重要】
-    请直接返回 JSON 数据，不要包含 ```json 或其他废话。
-    如果不确定，请尽力提取，不要报错。
-    
-    【论文片段】:
+    请从以下论文片段提取JSON: Title, Abstract, Year (int), Author, Journal。
+    如果不确定，请尽力提取。直接返回JSON。
+    片段:
     {pdf_text[:8000]}
     """
     try:
@@ -74,87 +57,37 @@ def extract_pdf_info_with_kimi(client, model, pdf_text, filename):
             model=model, messages=[{"role": "user", "content": prompt}], temperature=0.1
         )
         content = res.choices[0].message.content.strip()
-        
-        # 1. 尝试正则提取 JSON
         match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        
-        # 2. 尝试直接解析
-        try:
-            return json.loads(content)
-        except:
-            # 3. 🌟 最后的挽救：如果不是 JSON，直接把 Kimi 的回复当成摘要！
-            # 这样至少不会报错，内容还在
-            return {
-                "Title": filename,
-                "Abstract": f"【非结构化提取】{content[:300]}...", # 保留它的回复
-                "Year": 2024,
-                "Author": "Unknown"
-            }
-            
-    except Exception as e:
-        raise ValueError(f"API调用错误: {str(e)}")
+        if match: return json.loads(match.group(0))
+        try: return json.loads(content)
+        except: return {"Title": filename, "Abstract": f"【非结构化】{content[:300]}", "Year": 2024, "Author": "Unknown"}
+    except Exception as e: raise ValueError(f"API错误: {e}")
 
-def parse_compressed_files(uploaded_file, client, model):
+def parse_zip_files(uploaded_file, client, model):
     data_list = []
-    file_type = uploaded_file.name.split('.')[-1].lower()
-    
     try:
-        if file_type == 'zip':
-            archive = zipfile.ZipFile(uploaded_file, 'r')
-            file_list = archive.namelist()
-        elif file_type == 'rar':
-            uploaded_file.seek(0)
-            archive = rarfile.RarFile(uploaded_file, 'r')
-            file_list = archive.namelist()
-        else: return None, "不支持的格式"
-
-        pdf_files = [f for f in file_list if f.lower().endswith('.pdf')]
-        if not pdf_files: return None, "没有找到 PDF"
+        archive = zipfile.ZipFile(uploaded_file, 'r')
+        pdf_files = [f for f in archive.namelist() if f.lower().endswith('.pdf')]
+        
+        if not pdf_files: return None, "ZIP包里没有找到PDF"
 
         progress = st.progress(0); status = st.empty()
         
         for i, f_name in enumerate(pdf_files):
             status.text(f"Kimi 正在分析: {i+1}/{len(pdf_files)} - {f_name}")
-            
-            # 默认错误信息
-            err_msg = "未知错误"
-            
             try:
                 with archive.open(f_name) as f:
                     bytes_io = io.BytesIO(f.read())
                     reader = PdfReader(bytes_io)
-                    
-                    # 尝试读取文本
-                    text = ""
-                    for page in reader.pages[:3]:
-                        extracted = page.extract_text()
-                        if extracted: text += extracted
-                    
-                    # 🌟 诊断1：PDF 是否为空（扫描件）
-                    if len(text.strip()) < 20: 
-                        err_msg = "PDF为扫描件或纯图片，无法读取文字"
-                        raise ValueError(err_msg)
-                    
-                    # 调用 API
+                    text = "".join([p.extract_text() for p in reader.pages[:3]])
+                    if len(text.strip()) < 20: raise ValueError("无法读取文字(可能是扫描件)")
                     info = extract_pdf_info_with_kimi(client, model, text, f_name)
                     data_list.append(info)
-                    
             except Exception as e:
-                # 🌟 诊断2：捕获具体错误并显示在表格里
-                clean_err = str(e).replace("ValueError: ", "")
-                data_list.append({
-                    "Title": f_name, 
-                    "Abstract": f"❌ 解析失败: {clean_err}", 
-                    "Year": 2024, 
-                    "Author": "Unknown"
-                })
-            
+                data_list.append({"Title": f_name, "Abstract": f"❌ {str(e)}", "Year": 2024, "Author": "Unknown"})
             progress.progress((i+1)/len(pdf_files))
             
         return pd.DataFrame(data_list), None
-    except rarfile.RarCannotExec: return None, "服务器缺少 unrar"
     except Exception as e: return None, str(e)
 
 def retrieve_documents(query, df, top_k):
@@ -196,11 +129,11 @@ if input_mode == "直接上传 CSV":
     f = st.file_uploader("上传 CSV", type=["csv"])
     if f: df = pd.read_csv(f)
 else:
-    z = st.file_uploader("上传 ZIP/RAR", type=["zip", "rar"])
+    z = st.file_uploader("上传 ZIP 压缩包", type=["zip"])
     if z and st.button("开始解析 (调用 Kimi)"):
         if not client_kimi: st.error("请填入 Kimi API Key")
         else:
-            df, err = parse_compressed_files(z, client_kimi, kimi_model)
+            df, err = parse_zip_files(z, client_kimi, kimi_model)
             if err: st.error(err)
 
 if df is not None:
